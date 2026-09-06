@@ -5,7 +5,7 @@ require "optparse"
 require "time"
 require_relative "app_server"
 
-module CodexUsage
+module RCodex
   class TextRenderer
     def initialize(output:, clock: -> { Time.now }, env: ENV)
       @output = output
@@ -118,20 +118,34 @@ module CodexUsage
     end
 
     def run(argv)
+      usage = false
       json = false
       simple = false
       help = false
+      version = false
       parser = OptionParser.new do |opts|
-        opts.banner = "Usage: codex-usage [options]"
+        opts.banner = "Usage: rcodex --usage [--simple | --json]"
+        opts.on("--usage", "Show Codex rate-limit usage") { usage = true }
         opts.on("--json", "Print the raw JSON response") { json = true }
         opts.on("-s", "--simple", "Print plain, one-line-per-quota output") { simple = true }
         opts.on("-h", "--help", "Show this help") { help = true }
+        opts.on("-v", "--version", "Show the version") { version = true }
       end
-      parser.parse!(argv.dup)
-      if help
+      remaining = parser.parse(argv)
+      unless remaining.empty?
+        raise OptionParser::InvalidArgument, "unexpected arguments: #{remaining.join(' ')}"
+      end
+      if help || argv.empty?
         @output.puts parser
         return 0
       end
+
+      if version
+        @output.puts "rcodex #{VERSION}"
+        return 0
+      end
+
+      raise OptionParser::MissingArgument, "--usage is required" unless usage
 
       if json && simple
         raise OptionParser::InvalidOption, "--json and --simple cannot be used together"

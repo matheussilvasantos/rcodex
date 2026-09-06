@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-module CodexUsage
+module RCodex
   # A quota measured over a rolling time window. Presentation belongs elsewhere.
   class RateLimitWindow
     attr_reader :duration_minutes, :used_percent, :resets_at

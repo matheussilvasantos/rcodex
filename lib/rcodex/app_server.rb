@@ -3,8 +3,9 @@
 require "json"
 require "open3"
 require_relative "domain"
+require_relative "version"
 
-module CodexUsage
+module RCodex
   class AppServerError < StandardError; end
 
   # Translates the upstream schema at the boundary, keeping it out of the domain.
@@ -68,7 +69,7 @@ module CodexUsage
     def initialize_protocol
       request(
         "initialize",
-        params: { clientInfo: { name: "codex-usage", version: "1.0.0" } }
+        params: { clientInfo: { name: "rcodex", version: VERSION } }
       )
       send_message(method: "initialized", params: {})
       @initialized = true

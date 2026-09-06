@@ -1,0 +1,6 @@
+*.gem
+*.swp
+/.bundle/
+/vendor/bundle/
+/Gemfile.lock
+/pkg/
