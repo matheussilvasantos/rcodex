@@ -1,0 +1,75 @@
+{
+  "rateLimits": {
+    "limitId": "codex",
+    "limitName": null,
+    "primary": {
+      "usedPercent": 25,
+      "windowDurationMins": 300,
+      "resetsAt": 1788754899
+    },
+    "secondary": {
+      "usedPercent": 10,
+      "windowDurationMins": 10080,
+      "resetsAt": 1788784642
+    },
+    "credits": {
+      "hasCredits": false,
+      "unlimited": false,
+      "balance": "0"
+    },
+    "individualLimit": null,
+    "spendControlReached": false,
+    "planType": "plus",
+    "rateLimitReachedType": null
+  },
+  "rateLimitsByLimitId": {
+    "codex": {
+      "limitId": "codex",
+      "limitName": null,
+      "primary": {
+        "usedPercent": 25,
+        "windowDurationMins": 300,
+        "resetsAt": 1788754899
+      },
+      "secondary": {
+        "usedPercent": 10,
+        "windowDurationMins": 10080,
+        "resetsAt": 1788784642
+      },
+      "credits": {
+        "hasCredits": false,
+        "unlimited": false,
+        "balance": "0"
+      },
+      "individualLimit": null,
+      "spendControlReached": false,
+      "planType": "plus",
+      "rateLimitReachedType": null
+    }
+  },
+  "rateLimitResetCredits": {
+    "availableCount": 2,
+    "credits": [
+      {
+        "id": "reset-credit-example-1",
+        "resetType": "codexRateLimits",
+        "status": "available",
+        "grantedAt": 1788484399,
+        "expiresAt": 1791076399,
+        "title": "Full reset (Weekly + 5 hr)",
+        "description": "Example reset credit."
+      },
+      {
+        "id": "reset-credit-example-2",
+        "resetType": "codexRateLimits",
+        "status": "available",
+        "grantedAt": 1788562789,
+        "expiresAt": 1791154789,
+        "title": "Full reset (Weekly + 5 hr)",
+        "description": "Example reset credit."
+      }
+    ]
+  },
+  "accountId": "example-account-id",
+  "rateLimitUpsell": null
+}

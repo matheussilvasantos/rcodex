@@ -78,21 +78,47 @@ bundle exec rake test
 bundle exec ruby bin/rcodex --usage --simple
 ```
 
-Alternatively, with Minitest installed, run `ruby -Ilib:test test/rcodex_test.rb`.
+Run an individual test file with `bundle exec ruby -Ilib:test test/rcodex_test.rb`.
 Tests use fake Ruby subprocesses; no Codex installation or network access is
 needed. `require "rcodex"` loads the library without executing the CLI.
 
 ## Structure
 
 - `bin/rcodex`: executable entry point.
-- `lib/rcodex.rb`: library entry point under the `RCodex` namespace.
+- `lib/rcodex.rb`: composition root. `RCodex.cli` wires the application to concrete
+  infrastructure adapters without starting a server until usage is requested.
+- `lib/rcodex/application/`: `Application::CLI` orchestrates options, fetching,
+  parsing, and rendering through injected dependencies. `Application::Error`
+  defines the expected dependency-failure contract.
+- `lib/rcodex/domain/`: `Domain::RateLimits`, `Domain::Window`, and shared types.
+  These contain the data and domain behavior, with no I/O or normalization.
+- `lib/rcodex/infrastructure/`: subprocess access (`AppServer`), input adaptation
+  (`RateLimitsParser`, `ResponseNormalizer`), terminal output (`TextRenderer`),
+  and adapter errors derived from `Application::Error`.
 - `lib/rcodex/version.rb`: shared gem and protocol-client version.
-- `lib/rcodex/domain.rb`: rate-limit window and usage snapshot value objects.
-- `lib/rcodex/app_server.rb`: subprocess/protocol adapter and response mapping.
-- `lib/rcodex/cli.rb`: CLI orchestration and text presentation, with injectable
-  output streams and server factory.
 - `rcodex.gemspec`: gem metadata, packaged files, dependencies, and executable.
 
-DDD is limited to a small domain vocabulary and an explicit translation boundary.
-There is no persistence or domain lifecycle requiring repositories or aggregates.
-The raw JSON path intentionally bypasses domain mapping to retain unknown fields.
+Dependencies point inward: the domain loads independently, and the application
+never imports infrastructure. Infrastructure implements the injected contracts;
+only the composition root selects the concrete implementations. Tests verify
+layer loading in isolation and application behavior with fake dependencies.
+
+The API structs also serve as the domain model. `Domain::Window` provides
+`remaining_percent`; `Domain::RateLimits` provides `windows` and `empty?`.
+The renderer consumes these objects directly, with no duplicate domain structs
+or mapping step. Normalization remains outside the structs.
+
+Only fields used by the output are modeled: `planType`, `primary` and `secondary`,
+and each window's `usedPercent`, `windowDurationMins` and `resetsAt`.
+
+Every modeled key is required, including keys whose values may be `null`;
+`.optional` permits explicit nulls, not missing keys. Missing modeled fields and
+incorrect types produce a CLI error. In particular, `usedPercent` must be an
+integer and never defaults to zero. Unused API fields are ignored, not validated,
+and do not need to be present.
+
+`test/fixtures/rate_limits.json` captures the current response shape using
+synthetic account and reset-credit identifiers.
+
+The raw JSON path intentionally bypasses normalization and struct construction
+to retain all upstream fields.

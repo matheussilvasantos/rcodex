@@ -5,8 +5,11 @@ require "stringio"
 require "rbconfig"
 require "timeout"
 require_relative "../lib/rcodex"
+require_relative "support/rate_limits_fixture"
 
 class RCodexTest < Minitest::Test
+  include RateLimitsFixture
+
   class FakeServer
     attr_reader :closed
 
@@ -32,45 +35,51 @@ class RCodexTest < Minitest::Test
   end
 
   def payload
-    {
-      "rateLimits" => {
-        "planType" => "plus",
-        "primary" => { "windowDurationMins" => 300, "usedPercent" => 25 },
-        "secondary" => { "windowDurationMins" => 10_080, "usedPercent" => 10 }
-      }
-    }
+    result = api_payload
+    # Explicit null timestamps are valid and keep layout assertions clock-independent.
+    result["rateLimits"]["primary"]["resetsAt"] = nil
+    result["rateLimits"]["secondary"]["resetsAt"] = nil
+    result
+  end
+
+  def payload_without_windows
+    result = payload
+    result["rateLimits"]["primary"] = nil
+    result["rateLimits"]["secondary"] = nil
+    result
   end
 
   def cli(server)
-    RCodex::CLI.new(output: @output, error: @error, server_factory: -> { server })
+    RCodex.cli(output: @output, error: @error, server_factory: -> { server })
   end
 
-  def test_maps_both_supported_response_shapes
-    [payload, { "rateLimitsByLimitId" => { "codex" => payload["rateLimits"] } }].each do |result|
-      snapshot = RCodex::RateLimitsMapper.call(result)
-      assert_equal "plus", snapshot.plan
-      assert_equal [300, 10_080], snapshot.windows.map(&:duration_minutes)
+  def test_maps_response_with_populated_or_null_bucket_map
+    without_buckets = payload.merge("rateLimitsByLimitId" => nil)
+    [payload, without_buckets].each do |result|
+      snapshot = RCodex::Infrastructure::RateLimitsParser.call(result)
+      assert_equal "plus", snapshot.plan_type
+      assert_equal [300, 10_080], snapshot.windows.map(&:window_duration_mins)
       assert_equal [75.0, 90.0], snapshot.windows.map(&:remaining_percent)
-      assert snapshot.frozen?
       assert snapshot.windows.frozen?
-      assert snapshot.windows.all?(&:frozen?)
     end
   end
 
-  def test_direct_limits_take_precedence_but_plan_can_fall_back
+  def test_plan_comes_only_from_direct_limits
     result = payload
-    result["rateLimits"].delete("planType")
-    result["rateLimitsByLimitId"] = { "codex" => { "planType" => "pro" } }
-    snapshot = RCodex::RateLimitsMapper.call(result)
-    assert_equal "pro", snapshot.plan
-    assert_equal 2, snapshot.windows.size
+    result["rateLimitsByLimitId"]["codex"]["planType"] = "pro"
+    ["plus", nil].each do |plan|
+      result["rateLimits"]["planType"] = plan
+      snapshot = RCodex::Infrastructure::RateLimitsParser.call(result)
+      plan.nil? ? assert_nil(snapshot.plan_type) : assert_equal(plan, snapshot.plan_type)
+      assert_equal 2, snapshot.windows.size
+    end
   end
 
-  def test_missing_windows_and_missing_usage
-    assert RCodex::RateLimitsMapper.call({}).empty?
-    snapshot = RCodex::RateLimitsMapper.call("rateLimits" => { "primary" => {} })
-    assert_equal 100.0, snapshot.windows.first.remaining_percent
-    assert_nil snapshot.windows.first.resets_at
+  def test_null_windows_are_empty_but_missing_usage_is_an_error
+    assert RCodex::Infrastructure::RateLimitsParser.call(payload_without_windows).empty?
+    result = payload
+    result["rateLimits"]["primary"].delete("usedPercent")
+    assert_raises(RCodex::Infrastructure::InvalidResponseError) { RCodex::Infrastructure::RateLimitsParser.call(result) }
   end
 
   def test_default_output_and_cleanup
@@ -106,23 +115,24 @@ class RCodexTest < Minitest::Test
 
   def test_simple_output_is_plain_even_on_a_terminal
     @output.define_singleton_method(:tty?) { true }
-    snapshot = RCodex::RateLimitsMapper.call(payload)
-    RCodex::TextRenderer.new(output: @output, env: {}).render(snapshot, simple: true)
+    snapshot = RCodex::Infrastructure::RateLimitsParser.call(payload)
+    RCodex::Infrastructure::TextRenderer.new(output: @output, env: {}).render(snapshot, simple: true)
     refute_includes @output.string, "\e["
     refute_match(/[█░]/, @output.string)
   end
 
-  def test_simple_output_aligns_generic_labels_and_preserves_fractional_usage
-    snapshot = RCodex::UsageSnapshot.new(plan: nil, windows: [
-      RCodex::RateLimitWindow.new(duration_minutes: 15, used_percent: 25.5, resets_at: nil),
-      RCodex::RateLimitWindow.new(duration_minutes: nil, used_percent: 100, resets_at: nil)
-    ])
-    RCodex::TextRenderer.new(output: @output).render(snapshot, simple: true)
-    assert_equal "15-min quota:   74.5% left\nQuota:           0.0% left\n", @output.string
+  def test_simple_output_aligns_generic_labels
+    snapshot = RCodex::Domain::RateLimits.new(
+      plan_type: nil,
+      primary: { window_duration_mins: 15, used_percent: 25, resets_at: nil },
+      secondary: { window_duration_mins: nil, used_percent: 100, resets_at: nil }
+    )
+    RCodex::Infrastructure::TextRenderer.new(output: @output).render(snapshot, simple: true)
+    assert_equal "15-min quota:   75.0% left\nQuota:           0.0% left\n", @output.string
   end
 
   def test_simple_output_without_windows_reports_error
-    server = FakeServer.new(result: {})
+    server = FakeServer.new(result: payload_without_windows)
     assert_equal 1, cli(server).run(["--usage", "--simple"])
     assert_empty @output.string
     assert_includes @error.string, "No Codex rate-limit windows were returned."
@@ -130,7 +140,7 @@ class RCodexTest < Minitest::Test
   end
 
   def test_simple_and_json_are_mutually_exclusive_before_server_startup
-    application = RCodex::CLI.new(
+    application = RCodex.cli(
       output: @output, error: @error,
       server_factory: -> { flunk "server should not be started" }
     )
@@ -151,15 +161,16 @@ class RCodexTest < Minitest::Test
   end
 
   def test_no_windows_is_an_error_in_text_mode
-    server = FakeServer.new(result: {})
+    result = payload_without_windows
+    server = FakeServer.new(result: result)
     assert_equal 1, cli(server).run(["--usage"])
-    assert_equal "Codex\n\n", @output.string
-    assert_equal "No Codex rate-limit windows were returned.\n\n{}\n", @error.string
+    assert_equal "Codex · ChatGPT Plus\n\n", @output.string
+    assert_equal "No Codex rate-limit windows were returned.\n\n#{JSON.pretty_generate(result)}\n", @error.string
     assert server.closed
   end
 
   def test_help_and_invalid_options_do_not_launch_server
-    application = RCodex::CLI.new(
+    application = RCodex.cli(
       output: @output, error: @error,
       server_factory: -> { flunk "server should not be started" }
     )
@@ -170,7 +181,7 @@ class RCodexTest < Minitest::Test
   end
 
   def test_no_arguments_show_help_without_starting_server
-    application = RCodex::CLI.new(
+    application = RCodex.cli(
       output: @output, error: @error,
       server_factory: -> { flunk "server should not be started" }
     )
@@ -180,7 +191,7 @@ class RCodexTest < Minitest::Test
   end
 
   def test_version_does_not_start_server
-    application = RCodex::CLI.new(
+    application = RCodex.cli(
       output: @output, error: @error,
       server_factory: -> { flunk "server should not be started" }
     )
@@ -189,7 +200,7 @@ class RCodexTest < Minitest::Test
   end
 
   def test_format_flags_require_usage_and_positionals_are_rejected
-    application = RCodex::CLI.new(
+    application = RCodex.cli(
       output: @output, error: @error,
       server_factory: -> { flunk "server should not be started" }
     )
@@ -211,16 +222,16 @@ class RCodexTest < Minitest::Test
   end
 
   def test_failure_reports_error_and_closes_server
-    server = FakeServer.new(error: RCodex::AppServerError.new("failed"))
+    server = FakeServer.new(error: RCodex::Infrastructure::AppServerError.new("failed"))
     assert_equal 1, cli(server).run(["--usage"])
     assert_equal "Error: failed\n", @error.string
     assert server.closed
   end
 
   def test_startup_failure_reports_error
-    application = RCodex::CLI.new(
+    application = RCodex.cli(
       output: @output, error: @error,
-      server_factory: -> { raise RCodex::AppServerError, "missing executable" }
+      server_factory: -> { raise RCodex::Infrastructure::AppServerError, "missing executable" }
     )
     assert_equal 1, application.run(["--usage"])
     assert_equal "Error: missing executable\n", @error.string
@@ -228,36 +239,29 @@ class RCodexTest < Minitest::Test
 
   def test_renderer_handles_generic_durations_resets_and_out_of_range_usage
     timestamp = Time.local(2025, 1, 2, 3, 4)
-    windows = [
-      [2880, -10, timestamp.to_i],
-      [120, 110, timestamp.iso8601],
-      [15, 50, "invalid timestamp"],
-      [nil, 0, nil]
-    ].map do |duration, used, reset|
-      RCodex::RateLimitWindow.new(duration_minutes: duration, used_percent: used, resets_at: reset)
-    end
-    snapshot = RCodex::UsageSnapshot.new(plan: nil, windows: windows)
-    RCodex::TextRenderer.new(output: @output, clock: -> { timestamp - 172_800 }).render(snapshot)
+    snapshot = RCodex::Domain::RateLimits.new(
+      plan_type: nil,
+      primary: { window_duration_mins: 2880, used_percent: -10, resets_at: timestamp.to_i },
+      secondary: { window_duration_mins: 120, used_percent: 110, resets_at: timestamp.to_i }
+    )
+    RCodex::Infrastructure::TextRenderer.new(output: @output, clock: -> { timestamp - 172_800 }).render(snapshot)
     assert_includes @output.string, "2-day quota    #{'█' * 20}    110% left"
     assert_includes @output.string, "2-hour quota   #{'░' * 20}    -10% left"
-    assert_includes @output.string, "15-min quota"
     assert_equal 2, @output.string.scan("Resets Thu, Jan 2 at 03:04").size
-    assert_includes @output.string, "Resets invalid timestamp"
-    assert_includes @output.string, "Quota          #{'█' * 20}    100% left"
   end
 
   def test_terminal_colors_follow_remaining_quota_and_preserve_layout
-    { 100 => 32, 30.1 => 32, 30 => 33, 10.1 => 33, 10 => 31, 0 => 31 }.each do |remaining, code|
-      snapshot = RCodex::UsageSnapshot.new(plan: "plus", windows: [
-        RCodex::RateLimitWindow.new(
-          duration_minutes: 300, used_percent: 100 - remaining, resets_at: nil
-        )
-      ])
+    { 100 => 32, 31 => 32, 30 => 33, 11 => 33, 10 => 31, 0 => 31 }.each do |remaining, code|
+      snapshot = RCodex::Domain::RateLimits.new(
+        plan_type: "plus",
+        primary: { window_duration_mins: 300, used_percent: 100 - remaining, resets_at: nil },
+        secondary: nil
+      )
       terminal = StringIO.new
       terminal.define_singleton_method(:tty?) { true }
       plain = StringIO.new
-      RCodex::TextRenderer.new(output: terminal, env: {}).render(snapshot)
-      RCodex::TextRenderer.new(output: plain, env: {}).render(snapshot)
+      RCodex::Infrastructure::TextRenderer.new(output: terminal, env: {}).render(snapshot)
+      RCodex::Infrastructure::TextRenderer.new(output: plain, env: {}).render(snapshot)
 
       assert_equal 2, terminal.string.scan("\e[#{code}m").size
       assert_equal 2, terminal.string.scan("\e[0m").size
@@ -270,8 +274,8 @@ class RCodexTest < Minitest::Test
     [{ "NO_COLOR" => "1" }, { "NO_COLOR" => "" }, { "TERM" => "dumb" }].each do |env|
       terminal = StringIO.new
       terminal.define_singleton_method(:tty?) { true }
-      snapshot = RCodex::RateLimitsMapper.call(payload)
-      RCodex::TextRenderer.new(output: terminal, env: env).render(snapshot)
+      snapshot = RCodex::Infrastructure::RateLimitsParser.call(payload)
+      RCodex::Infrastructure::TextRenderer.new(output: terminal, env: env).render(snapshot)
       refute_includes terminal.string, "\e["
     end
   end
@@ -295,13 +299,13 @@ class RCodexTest < Minitest::Test
       86_400 => "Fri, Jan 3 at 03:04"
     }.each do |seconds, expected|
       output = StringIO.new
-      snapshot = RCodex::UsageSnapshot.new(plan: nil, windows: [
-        RCodex::RateLimitWindow.new(
-          duration_minutes: 300, used_percent: 25.5, resets_at: (now + seconds).to_i
-        )
-      ])
-      RCodex::TextRenderer.new(output: output, clock: -> { now }).render(snapshot)
-      assert_includes output.string, "   74.5% left"
+      snapshot = RCodex::Domain::RateLimits.new(
+        plan_type: nil,
+        primary: { window_duration_mins: 300, used_percent: 25, resets_at: (now + seconds).to_i },
+        secondary: nil
+      )
+      RCodex::Infrastructure::TextRenderer.new(output: output, clock: -> { now }).render(snapshot)
+      assert_includes output.string, "     75% left"
       assert_equal "#{' ' * 15}Resets #{expected}\n", output.string.lines.last
     end
   end
@@ -349,7 +353,7 @@ class AppServerTest < Minitest::Test
   RUBY
 
   def with_server(mode = "normal")
-    server = RCodex::AppServer.new(command: [RbConfig.ruby, "-e", SERVER, mode])
+    server = RCodex::Infrastructure::AppServer.new(command: [RbConfig.ruby, "-e", SERVER, mode])
     Timeout.timeout(5) { yield server }
   ensure
     server&.close
@@ -369,7 +373,7 @@ class AppServerTest < Minitest::Test
 
   def test_server_errors
     with_server("error") do |server|
-      error = assert_raises(RCodex::AppServerError) { server.rate_limits }
+      error = assert_raises(RCodex::Infrastructure::AppServerError) { server.rate_limits }
       assert_includes error.message, "denied"
       assert_includes error.message, "42"
     end
@@ -377,7 +381,7 @@ class AppServerTest < Minitest::Test
 
   def test_unexpected_exit_includes_stderr
     with_server("exit") do |server|
-      error = assert_raises(RCodex::AppServerError) { server.rate_limits }
+      error = assert_raises(RCodex::Infrastructure::AppServerError) { server.rate_limits }
       assert_includes error.message, "exited unexpectedly"
       assert_includes error.message, "server failed"
     end
@@ -391,8 +395,8 @@ class AppServerTest < Minitest::Test
   end
 
   def test_missing_executable
-    error = assert_raises(RCodex::AppServerError) do
-      RCodex::AppServer.new(command: ["/nonexistent/rcodex-test"])
+    error = assert_raises(RCodex::Infrastructure::AppServerError) do
+      RCodex::Infrastructure::AppServer.new(command: ["/nonexistent/rcodex-test"])
     end
     assert_includes error.message, "was not found in PATH"
   end

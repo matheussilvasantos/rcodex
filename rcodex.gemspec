@@ -15,6 +15,9 @@ Gem::Specification.new do |spec|
   spec.executables = ["rcodex"]
   spec.require_paths = ["lib"]
 
+  spec.add_dependency "dry-inflector", "~> 1.0"
+  spec.add_dependency "dry-struct", "~> 1.6"
+  spec.add_dependency "dry-types", "~> 1.7"
   spec.add_dependency "json", ">= 2.3", "< 3"
   spec.add_dependency "open3", ">= 0.1", "< 1"
   spec.add_dependency "optparse", ">= 0.1", "< 1"
